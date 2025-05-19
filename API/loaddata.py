@@ -23,7 +23,7 @@ async def load_files_from_blob():
     try:
         with get_conn() as conn:
             cursor = conn.cursor()
-            #cursor.execute(f"BULK INSERT dbo.Persons2 FROM 'sources/Persons.csv' WITH ( DATA_SOURCE = 'SourceAzureBlobStorage', FORMAT = 'CSV', CODEPAGE = 65001, FIRSTROW = 2, ROWTERMINATOR = '0x0a', BATCHSIZE = 1000, TABLOCK);")
+
             #Ingest departments
             cursor.execute(f"TRUNCATE TABLE [STAGE].[Departments];")
             sql = "BULK INSERT [STAGE].[Departments] FROM 'sources/sourcefiles/departments.csv' WITH ( DATA_SOURCE = 'SourceAzureBlobStorage', FORMAT = 'CSV', CODEPAGE = 65001, FIRSTROW = 1, ROWTERMINATOR = '0x0a', BATCHSIZE = 1000, ERRORFILE = 'sources/loaderrors/departments_load_errors_{}', ERRORFILE_DATA_SOURCE = 'SourceAzureBlobStorage', MAXERRORS = 999, TABLOCK);"
@@ -53,13 +53,17 @@ async def load_files_from_blob():
 
             cursor.execute(f"EXEC [STAGE].[USP_LOAD_DATA_TO_FINAL_TABLES];")
             conn.commit()
+            cursor.close()
+            conn.close()  
 
-        output = 'Successful data load'
+        output = {"message": "Successful data load"}
+        
     except Exception as e:
         print(e)
-        output = e
+        output = {"message": f""+e+""}
 
     return output
+
 
 
 @app.get("/backupdata")
@@ -174,6 +178,62 @@ async def backup_data_to_avro():
 
         print("Hired employees backup file uploaded to blob")
 
+        cursor.close()
+        conn.close()  
+
+        return {"message": "Tables were backed up successfully"}
+
+
+@app.post("/restore/{target_table}")
+async def restore_table_from_backup(target_table: str):
+    
+    #Run only if target table is jobs, departments, hired employees
+    if target_table.upper() == "JOBS" or target_table.upper() == "DEPARTMENTS" or target_table.upper() == "HIREDEMPLOYEES":
+        #Set blob_name
+        if target_table.upper() == "JOBS":
+            blob_name = "backup/backup_jobs.avro"
+        if target_table.upper() == "DEPARTMENTS":
+            blob_name = "backup/backup_departments.avro"
+        if target_table.upper() == "HIREDEMPLOYEES":
+            blob_name = "backup/backup_hiredemployees.avro"
+        
+        try:
+            # Get blob client
+            blob_client = blob_service_client.get_blob_client(container="sources",blob=blob_name)
+            
+            # Download blob content into memory
+            avro_stream = io.BytesIO()
+            download_stream = blob_client.download_blob()
+            download_stream.readinto(avro_stream)
+            avro_stream.seek(0)
+            
+            # Parse AVRO using fastavro
+            avro_reader = list(fastavro.reader(avro_stream))
+
+            if not avro_reader:
+                return {"message": "Backup source file not available on backup location"}
+
+            # Connect to Azure SQL to insert data. Using bulk insert with executemany
+            with get_conn() as conn:
+                cursor = conn.cursor()
+
+                columns = list(avro_reader[0].keys())
+                placeholders = ','.join(['?'] * len(columns))
+                truncate_sql = f"TRUNCATE TABLE [dbo].[" + target_table.upper() + "]"
+                insert_sql = f"INSERT INTO [dbo].[{target_table.upper()}] ({','.join(columns)}) VALUES ({placeholders})"
+                values = [tuple(record[col] for col in columns) for record in avro_reader]
+                cursor.execute(truncate_sql)
+                cursor.executemany(insert_sql, values)
+                conn.commit()
+                cursor.close()
+                conn.close()                   
+
+            return {"message": f"Table " + target_table + " was successfully restored from backup"}
+        
+        except Exception as e:
+            print(e)
+    else:
+        return {"message": "No valid table to restore provided"}
 
 
 def get_conn():
@@ -183,4 +243,3 @@ def get_conn():
     SQL_COPT_SS_ACCESS_TOKEN = 1256   # This connection option is defined by microsoft in msodbcsql.h
     conn = pyodbc.connect(connection_string, attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct})
     return conn
-
