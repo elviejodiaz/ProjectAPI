@@ -1,11 +1,13 @@
-import os, io
-from fastapi import FastAPI
+import os
+from io import BytesIO
+from fastapi import FastAPI, UploadFile
 from azure import identity
 from azure.storage.blob import BlobServiceClient
 import pyodbc, struct
 import csv
-import fastavro
+from fastavro import reader, writer
 from datetime import datetime
+import pandas as pd
 
 #Get connection string for Azure SQL and Storage Account
 connection_string = os.environ.get('AZURE_SQL_CONNECTIONSTRING')
@@ -53,14 +55,12 @@ async def load_files_from_blob():
 
             cursor.execute(f"EXEC [STAGE].[USP_LOAD_DATA_TO_FINAL_TABLES];")
             conn.commit()
-            cursor.close()
-            conn.close()  
 
         output = {"message": "Successful data load"}
         
     except Exception as e:
         print(e)
-        output = {"message": f""+e+""}
+        output = {"message": f""+str(e)+""}
 
     return output
 
@@ -122,7 +122,7 @@ async def backup_data_to_avro():
                     "job": row[1]
                 }
 
-                fastavro.writer(avro_file, jobs_avro_schema, [data])
+                writer(avro_file, jobs_avro_schema, [data])
 
         
         with open("backup_jobs.avro", "rb") as data:
@@ -144,7 +144,7 @@ async def backup_data_to_avro():
                     "department": row[1]
                 }
 
-                fastavro.writer(avro_file, departments_avro_schema, [data])
+                writer(avro_file, departments_avro_schema, [data])
 
         
         with open("backup_departments.avro", "rb") as data:
@@ -169,7 +169,7 @@ async def backup_data_to_avro():
                     "job_id": row[4]
                 }
 
-                fastavro.writer(avro_file, hiredemployees_avro_schema, [data])
+                writer(avro_file, hiredemployees_avro_schema, [data])
 
         
         with open("backup_hiredemployees.avro", "rb") as data:
@@ -192,43 +192,55 @@ async def restore_table_from_backup(target_table: str):
         #Set blob_name
         if target_table.upper() == "JOBS":
             blob_name = "backup/backup_jobs.avro"
+            # os.remove("backup_jobs.csv")
         if target_table.upper() == "DEPARTMENTS":
             blob_name = "backup/backup_departments.avro"
+            # os.remove("backup_departments.csv")
         if target_table.upper() == "HIREDEMPLOYEES":
             blob_name = "backup/backup_hiredemployees.avro"
+            # os.remove("backup_hiredemployees.csv")
         
         try:
             # Get blob client
             blob_client = blob_service_client.get_blob_client(container="sources",blob=blob_name)
             
             # Download blob content into memory
-            avro_stream = io.BytesIO()
+            avro_bytes = BytesIO()
             download_stream = blob_client.download_blob()
-            download_stream.readinto(avro_stream)
-            avro_stream.seek(0)
+            avro_bytes.write(download_stream.readall())
+            avro_bytes.seek(0)
+
+            # Read Avro and convert to pandas DataFrame
+            records = []
+            avro_reader = reader(avro_bytes)
+            for record in avro_reader:
+                records.append(record)
+
+            df = pd.DataFrame(records)
+            df.replace(r'\r', '', regex=True, inplace=True)
             
-            # Parse AVRO using fastavro
-            avro_reader = list(fastavro.reader(avro_stream))
+            # Convert to CSV in-memory
+            csv_buffer = BytesIO()
+            df.to_csv(csv_buffer, index=False, header=False, lineterminator="")
+            csv_buffer.seek(0)
 
-            if not avro_reader:
-                return {"message": "Backup source file not available on backup location"}
+            # Upload CSV to Blob Storage
+            blob_client = blob_service_client.get_blob_client("sources",blob="backup/backup_"+target_table.upper()+".csv")
+            blob_client.upload_blob(csv_buffer, overwrite=True)
 
-            # Connect to Azure SQL to insert data. Using bulk insert with executemany
+            # Truncate and insert to target table
             with get_conn() as conn:
                 cursor = conn.cursor()
-
-                columns = list(avro_reader[0].keys())
-                placeholders = ','.join(['?'] * len(columns))
-                truncate_sql = f"TRUNCATE TABLE [dbo].[" + target_table.upper() + "]"
-                insert_sql = f"INSERT INTO [dbo].[{target_table.upper()}] ({','.join(columns)}) VALUES ({placeholders})"
-                values = [tuple(record[col] for col in columns) for record in avro_reader]
-                cursor.execute(truncate_sql)
-                cursor.executemany(insert_sql, values)
+                cursor.execute(f"TRUNCATE TABLE [dbo].["+target_table.upper()+"];")
+                sql = "BULK INSERT [dbo].["+target_table.upper()+"] FROM 'sources/backup/backup_"+target_table.upper()+".csv' WITH ( DATA_SOURCE = 'SourceAzureBlobStorage', FORMAT = 'CSV', CODEPAGE = 65001, FIRSTROW = 1, ROWTERMINATOR = '0x0a', BATCHSIZE = 1000, ERRORFILE = 'sources/loaderrors/"+target_table.upper()+"_load_errors_{}', ERRORFILE_DATA_SOURCE = 'SourceAzureBlobStorage', MAXERRORS = 999, TABLOCK);"
+                now = datetime.now()
+                formatted_datetime = now.strftime("%Y-%m-%d %H:%M:%S")
+                new_sql = sql.format(formatted_datetime)
+                cursor.execute(new_sql)
                 conn.commit()
-                cursor.close()
-                conn.close()                   
 
-            return {"message": f"Table " + target_table + " was successfully restored from backup"}
+
+            return {"message": f"Table " + target_table.upper() + " was successfully restored from backup"}
         
         except Exception as e:
             print(e)
