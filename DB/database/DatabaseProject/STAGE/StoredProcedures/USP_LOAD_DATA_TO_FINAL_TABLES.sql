@@ -6,14 +6,18 @@ BEGIN
 --No	Date		Description
 --01	2025-05-18	Proc creation
 --02	2025-05-19	Added logic to log data load errors
+--03	2025-05-22	Added logic to remove duplicates
 ------------
 
 ------------
 --Sync jobs
 ------------
 INSERT INTO [dbo].[Jobs]
-SELECT * FROM [STAGE].[Jobs]
+SELECT DISTINCT
+	ID, JOB
+FROM [STAGE].[Jobs]
 WHERE NULLIF(ID,'') IS NOT NULL
+	AND ID NOT IN (SELECT DISTINCT ID FROM [dbo].[Jobs])
 
 UPDATE [dbo].[Jobs]
 SET [JOB] = B.[JOB]
@@ -36,8 +40,11 @@ WHERE NULLIF(ID,'') IS NULL
 --Sync deparments
 ------------
 INSERT INTO [dbo].[Departments]
-SELECT * FROM [STAGE].[Departments]
+SELECT DISTINCT
+	ID, DEPARTMENT 
+FROM [STAGE].[Departments]
 WHERE NULLIF(ID,'') IS NOT NULL
+	AND ID NOT IN (SELECT DISTINCT ID FROM [dbo].[Departments])
 
 UPDATE [dbo].[Departments]
 SET [DEPARTMENT] = B.[DEPARTMENT]
@@ -60,9 +67,12 @@ WHERE NULLIF(ID,'') IS NULL
 --Sync hired employees
 ------------
 INSERT INTO [dbo].[HiredEmployees]
-SELECT * FROM [STAGE].[HiredEmployees]
+SELECT DISTINCT ID, [NAME], [DATETIME], department_id, job_id
+FROM [STAGE].[HiredEmployees]
 WHERE NULLIF(department_id,'') IS NOT NULL
    AND NULLIF(job_id,'') IS NOT NULL
+   AND NULLIF([DATETIME],'') IS NOT NULL
+   AND ID NOT IN (SELECT DISTINCT ID FROM [dbo].[HiredEmployees])
 
 UPDATE [dbo].[HiredEmployees]
 SET [NAME] = B.[NAME],
@@ -74,6 +84,7 @@ FROM [dbo].[HiredEmployees] A
       ON A.ID = B.ID
 WHERE NULLIF(B.department_id,'') IS NOT NULL
    AND NULLIF(B.job_id,'') IS NOT NULL
+   AND NULLIF(B.[DATETIME],'') IS NOT NULL
 
 --Log load errors HiredEmployees
 INSERT INTO [STAGE].[LOADERRORS]
@@ -89,5 +100,6 @@ FROM [STAGE].[HiredEmployees]
 WHERE NULLIF(ID,'') IS NULL
 	OR NULLIF(department_id,'') IS NULL
 	OR NULLIF(job_id,'') IS NULL
+	OR NULLIF([DATETIME],'') IS NULL
 
 END
