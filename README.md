@@ -1,100 +1,111 @@
 
 # PROJECT API Architecture
 
-![REST API Architecture](REST_API_Architecture.png)
+![REST API Architecture](REST_API_Architecture_Diagram.png)
 
 ## Overview
 
-This document describes the architecture of a REST API built with FastAPI, which interacts with Azure SQL Database and Azure Storage Account. The REST API exposes three methods: `loadfiles`, `backupdata`, and `restore`.
+This document describes the architecture of a solution which allows data loading from CSV files to a SQL database, backing up data on SQL database on avro files, and restoring data from avro files to SQL database. In general terms, the solution is composed by a REST API built with FastAPI (written un python), a SQL database in Azure SQL, and an Azure Storage Account
+
+<!-- , which interacts with Azure SQL Database and Azure Storage Account. The REST API exposes three methods: `loadfiles`, `backupdata`, and `restore`. -->
 
 ## Components
 
-### Client
-The client initiates requests to the REST API. It can be any application or user that needs to interact with the data stored in Azure SQL Database and Azure Storage Account.
+As introduced above, this solution is composed mainly by three components: REST API, SQL Database and an Storage Account. More on them below:
 
 ### REST API
-The REST API is built using FastAPI and serves as the central component that processes client requests and interacts with Azure services.
 
-### Azure Storage Account
-Azure Storage Account is used to store CSV files and Avro files. It acts as the storage backend for the REST API.
+REST API is coded with python, using FastAPI. For SQL database connection it was used pyodbc library and for AVRO files data manipulation it was used fastavro. For azure identity operations and azure storage blob storage operations, it was used azure libraries
+
+#### REST API Methods:
+
+The API has the following methods:
+
+##### GET `/loadfiles`
+- **Description** loads the information of CSV files to target tables. There are 3 CSV files located on the Azure Storage Account
+    - **jobs.csv** contains the information to load to table STAGE.Jobs
+    - **departments.csv** contains the information to load to table STAGE.Departments
+    - **hiredemployees.csv** contains the information to load to table STAGE.HiredEmployees
+
+##### GET `/backupdata`
+- **Description** backs the information up of tables dbo.Jobs, dbo.Departments and dbo.HiredEmployees onto AVRO files (one file per table). Destination files are saved on Azure Storage account
+
+##### POST `/restore`
+- **Description** restores the information of a target table (received via parameters) from corresponding backup AVRO file (from method `/backupdata`) to target table (it can be dbo.Jobs, dbo.Departments or dbo.HiredEmployees)
+- **Parameters**
+    - **target_table (string)** target table to be restored from backup
+
+#### Relevant Aspects
+- **Data Loading to Database** on methods `/loadfiles` and `/restore`, data loading to SQL database is done via bulk insert from CSV files, mainly due to faster performance. In case of restore from AVRO files, data is first converted to CSV before and then loaded from CSV to target table using bulk insert
+- **STAGE DB Schema** there are two database schemas on database: dbo and STAGE. Tables Jobs, Departments and HiredEmployees exist on both schemas. The purpose of schema STAGE is to load the data from CSV files raw, not taking into consideration data integrity. After data load to STAGE schema tables is completed, data is then copied to tables on dbo schema, which contains the data in a clean format
+- **Configuration** file config.env contains environment variables for Azure SQL database connection string and Azure Storege connection string
 
 ### Azure SQL Database
-Azure SQL Database is used to store the data in structured tables. It acts as the database backend for the REST API.
 
-## Methods
+Image below displays an over-simplified database architecture, which shows the presence of tables Jobs, Departments and HiredEmployees on schemas dbo and STAGE:
 
-### `loadfiles`
-- **Client** sends a request to the REST API.
-- **REST API** retrieves CSV files from Azure Storage.
-- **REST API** loads the data into Azure SQL tables (`Jobs`, `Departments`, `HiredEmployees`).
+![Company Database Schema](Company_Database_Schema.png)
 
-### `backupdata`
-- **Client** sends a request to the REST API.
-- **REST API** fetches data from Azure SQL tables.
-- **REST API** stores the data as Avro files in Azure Storage.
+#### Database Objects
+```
+Company Database/
+├── dbo/
+│   ├── Tables/
+│   │   ├── Departments
+│   │   ├── DimDate: date dimension
+│   │   ├── HiredEmployees
+│   │   └── Jobs
+│   └── Views/
+│       ├── VW_EMPLOYEES_HIRED_PER_DEPARTMENT_JOB_YEAR_QUARTER: returns the employees hired by Department, Job, Year and Quarter
+│       └── VW_HIRES_PER_DEPARTMENT_EXCEEDING_YEAR_MEAN: returns the number of hires for each department, which exceed the mean of hires
+├── STAGE/
+│   ├── Tables/
+│   │   ├── Departments
+│   │   ├── LoadErrors: contains the load errors (offending records) while loading data for tables Jobs, Departments and HiredEmployees from STAGE schema to dbo
+│   │   ├── HiredEmployees
+│   │   └── Jobs
+│   └── StoredProcedures/
+│       └── USP_LOAD_DATA_TO_FINAL_TABLES: loads data for tables Jobs, Departments and HiredEmployees from STAGE schema to dbo, taking into consideration data integrity rules. In case of errors,they are logged on table STAGE.LoadErrors
+```
 
-### `restore`
-- **Client** sends a request to the REST API with the name of the target table (`Jobs`, `Departments`, `HiredEmployees`).
-- **REST API** retrieves the corresponding Avro file from Azure Storage.
-- **REST API** restores the data into the specified Azure SQL table.
+### Azure Storage Account
+It is a regular Azure Storage Account with a single container, containing source CSV files, AVRO backup files and data loading errors. It has the following folder structure
 
-## Diagram
+```
+sources (continer)/
+├── backup (folder): location where AVRO backup files are kept
+├── sorucefiles (folder): location where source CSV files are kept
+└── loaderrors (folder): location where data load error logs are kept
+```
 
-The diagram above illustrates the interactions between the client, REST API, Azure Storage Account, and Azure SQL Database for each method (`loadfiles`, `backupdata`, `restore`).
+## Dockerfile
 
-# Company Database Architecture
+A Dockerfile was created to facilitate creating image of the solution and deploy to a container-based environment. 
 
-![Company Database Star Schema](Company_Database_Schema.png)
+Relevant aspects:
+- **Base Image** it was used python:3.11-slim as the base image
+- **System Dependencies and Other Packages** besides installing system dependecy packages it also installs Microsoft SQL Server package for Debian 11
+- **REST API Requirements Installation** on repo it is present file requirements.txt, which contains the list of all libraries used on the API, which are to be installed as part of image creation
+- **Run API** to run the API it is used uvicorn
 
-## Overview
+## Reporting (Insights)
 
-This document describes the architecture of the Company database hosted on Azure SQL. The database consists of several tables with defined relationships.
+A Power BI file was created (ProjectInsights.pbix) to allow doing analytics with the data
 
-## Tables
+The data model created is shown below:
 
-### dbo.Departments
-- **id**: INT, Primary Key
-- **department**: NVARCHAR(4000)
+![Data Model](Model.png)
 
-### dbo.Jobs
-- **id**: INT, Primary Key
-- **job**: NVARCHAR(4000)
+Two pages were created on report:
 
-### dbo.HiredEmployees
-- **id**: INT, NOT NULL
-- **name**: NVARCHAR(4000)
-- **datetime**: NVARCHAR(4000)
-- **department_id**: INT, Foreign Key referencing dbo.Departments(id)
-- **job_id**: INT, Foreign Key referencing dbo.Jobs(id)
+### HiresPerDepartment
 
-### dbo.DimDate
-- **DateKey**: INT, NOT NULL, PRIMARY KEY
-- **FullDate**: DATE, NOT NULL
-- **Day**: TINYINT, NOT NULL
-- **DaySuffix**: CHAR(4), NOT NULL
-- **Weekday**: TINYINT, NOT NULL
-- **WeekdayName**: VARCHAR(10), NOT NULL
-- **IsWeekend**: BIT, NOT NULL
-- **DOWInMonth**: TINYINT, NOT NULL
-- **DayOfYear**: SMALLINT, NOT NULL
-- **WeekOfMonth**: TINYINT, NOT NULL
-- **WeekOfYear**: TINYINT, NOT NULL
-- **Month**: TINYINT, NOT NULL
-- **MonthName**: VARCHAR(10), NOT NULL
-- **Quarter**: TINYINT, NOT NULL
-- **QuarterName**: VARCHAR(10), NOT NULL
-- **Year**: INT, NOT NULL
-- **MMYYYY**: CHAR(6), NOT NULL
-- **FirstDayOfMonth**: DATE, NOT NULL
-- **LastDayOfMonth**: DATE, NOT NULL
-- **IsLeapYear**: BIT, NOT NULL
+![Hires per Department](HiresPerDepartment.png)
 
-## Relationships
+Allows analyzing the data of hired employees for each combination of department and job in every quarter of the year. By default year 2021 is selected. It also contains an stacked bar chart of the hires per department for each quarter
 
-### dbo.HiredEmployees
-- **department_id** references **dbo.Departments(id)**
-- **job_id** references **dbo.Jobs(id)**
+### HiresPerDepartment_MeanAverage
 
-## Diagram
+![Hires per Department](HiresPerDepartmentExceendingMean.png)
 
-The diagram above illustrates the star schema architecture of the Company database, showing the relationships between the fact table (HiredEmployees) and dimension tables (Departments, Jobs, DimDate).
+Allows reviewing the number of hires per department which exceed the departments average for the period selected. Mean hires is visible on the dashboards. It is also available a bar chart per department, displaying the total of hires of every department, compared against the mean of sales
