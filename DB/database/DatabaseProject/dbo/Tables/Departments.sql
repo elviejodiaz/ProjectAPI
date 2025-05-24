@@ -1,7 +1,8 @@
 CREATE TABLE [dbo].[Departments] (
-    [id]         INT             NULL,
-    [department] NVARCHAR (4000) NULL
+    [id] INT NOT NULL PRIMARY KEY,
+    [department] NVARCHAR(4000) NULL
 );
+
 
 
 GO
